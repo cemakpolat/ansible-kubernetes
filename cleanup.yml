@@ -1,0 +1,21 @@
+# cleanup.yml
+- hosts: all
+  become: yes
+  tasks:
+    - name: Reset Kubernetes
+      shell: kubeadm reset -f
+      ignore_errors: yes
+    
+    - name: Remove directories
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+        - /etc/cni/net.d
+        - /opt/cni/bin
+    
+    - name: Clean iptables
+      shell: iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X

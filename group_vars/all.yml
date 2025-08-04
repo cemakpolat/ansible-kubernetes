@@ -1,0 +1,44 @@
+---
+# Kubernetes cluster configuration
+k8s_version: "1.28"
+k8s_cgroup_driver: "systemd"
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+
+# Container runtime
+container_runtime: "containerd"
+
+# Network plugin
+network_plugin: "flannel"
+
+# Node configuration
+disable_swap: true
+enable_ipvs: false
+
+# Docker/Containerd configuration
+docker_daemon_config:
+  exec-opts:
+    - "native.cgroupdriver=systemd"
+  log-driver: "json-file"
+  log-opts:
+    max-size: "100m"
+  storage-driver: "overlay2"
+
+# Firewall ports
+k8s_master_ports:
+  - "6443/tcp"   # Kubernetes API server
+  - "2379-2380/tcp"  # etcd server client API
+  - "10250/tcp"  # Kubelet API
+  - "10251/tcp"  # kube-scheduler
+  - "10252/tcp"  # kube-controller-manager
+
+k8s_worker_ports:
+  - "10250/tcp"  # Kubelet API
+  - "30000-32767/tcp"  # NodePort Services
+
+kubernetes_repo_key: "https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key"
+kubernetes_repo: "deb https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /"
+
+# Backup settings
+etcd_backup_enabled: true
+backup_retention_days: 7

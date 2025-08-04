@@ -1,0 +1,7 @@
+---
+- name: Setup Kubernetes Master
+  hosts: masters
+  become: yes
+  gather_facts: yes
+  roles:
+    - k8s-master

@@ -1,0 +1,279 @@
+---
+- name: Check if cluster is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+
+- name: Initialize Kubernetes cluster
+  shell: |
+    kubeadm init \
+      --pod-network-cidr={{ pod_network_cidr }} \
+      --service-cidr={{ service_cidr }} \
+      --apiserver-advertise-address={{ ansible_default_ipv4.address }}
+  register: kubeadm_init
+  when: not k8s_admin_conf.stat.exists
+
+- name: Create .kube directory for root
+  file:
+    path: /root/.kube
+    state: directory
+    mode: '0755'
+
+- name: Copy admin.conf to root's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: yes
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Create .kube directory for akpolat user
+  file:
+    path: /home/akpolat/.kube
+    state: directory
+    owner: akpolat
+    group: akpolat
+    mode: '0755'
+
+- name: Copy admin.conf to akpolat's kube config
+  copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/akpolat/.kube/config
+    remote_src: yes
+    owner: akpolat
+    group: akpolat
+    mode: '0644'
+
+- name: Get join token
+  shell: kubeadm token create --print-join-command
+  register: k8s_join_command
+  when: not k8s_admin_conf.stat.exists
+
+- name: Save join command to local file
+  copy:
+    content: "{{ k8s_join_command.stdout }}"
+    dest: "./k8s-join-command"
+  delegate_to: localhost
+  become: no
+  when: 
+    - k8s_join_command is defined
+    - k8s_join_command.stdout is defined
+    - not k8s_admin_conf.stat.exists
+
+- name: Check if Flannel is already installed
+  shell: kubectl get daemonset -n kube-flannel flannel-ds-amd64
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: flannel_exists
+  ignore_errors: yes
+
+- name: Install Flannel network plugin
+  shell: kubectl apply -f https://raw.githubusercontent.com/flannel-io/flannel/master/Documentation/kube-flannel.yml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  when: flannel_exists.rc != 0
+
+- name: Wait for Flannel pods to be ready
+  shell: kubectl get pods -n kube-flannel --no-headers | grep -v Running | wc -l
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: flannel_not_ready
+  until: flannel_not_ready.stdout == "0"
+  retries: 20
+  delay: 15
+  ignore_errors: yes
+
+- name: Wait for all nodes to be ready
+  shell: kubectl get nodes --no-headers | awk '{print $2}' | grep -v Ready | wc -l
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: not_ready_nodes
+  until: not_ready_nodes.stdout == "0"
+  retries: 30
+  delay: 10
+
+- name: Wait for worker nodes to join and be ready
+  shell: kubectl get nodes --no-headers | grep -v master | grep Ready | wc -l
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: ready_workers
+  until: ready_workers.stdout|int >= {{ groups['workers']|length }}
+  retries: 30
+  delay: 10
+
+- name: Label worker nodes
+  shell: kubectl label node {{ hostvars[item]['ansible_hostname'] }} node-role.kubernetes.io/worker=worker --overwrite
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  loop: "{{ groups['workers'] }}"
+  ignore_errors: yes
+
+
+
+# roles/k8s-master/tasks/main.yml
+- name: Create restricted pod security policy
+  shell: kubectl apply -f https://raw.githubusercontent.com/kubernetes/website/main/content/en/examples/policy/restricted-psp.yaml
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  ignore_errors: yes
+
+- name: Apply default resource quotas
+  shell: |
+    kubectl create namespace production || true
+    kubectl apply -f - <<EOF
+    apiVersion: v1
+    kind: ResourceQuota
+    metadata:
+      name: compute-quota
+      namespace: production
+    spec:
+      hard:
+        requests.cpu: "1"
+        requests.memory: 1Gi
+        limits.cpu: "2"
+        limits.memory: 2Gi
+    EOF
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Install metrics-server with proper configuration
+  shell: |
+    kubectl apply -f - <<EOF
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: metrics-server
+      namespace: kube-system
+    ---
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: metrics-server
+      namespace: kube-system
+    spec:
+      selector:
+        matchLabels:
+          k8s-app: metrics-server
+      template:
+        metadata:
+          labels:
+            k8s-app: metrics-server
+        spec:
+          serviceAccountName: metrics-server
+          containers:
+          - name: metrics-server
+            image: k8s.gcr.io/metrics-server/metrics-server:v0.6.1
+            args:
+              - --cert-dir=/tmp
+              - --secure-port=4443
+              - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+              - --kubelet-use-node-status-port
+              - --kubelet-insecure-tls
+    EOF
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+  
+
+  
+- name: Install metrics-server deployment
+  shell: |
+    kubectl apply -f - <<EOF
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: metrics-server
+      namespace: kube-system
+      labels:
+        k8s-app: metrics-server
+    spec:
+      selector:
+        matchLabels:
+          k8s-app: metrics-server
+      template:
+        metadata:
+          labels:
+            k8s-app: metrics-server
+        spec:
+          serviceAccountName: metrics-server
+          containers:
+          - name: metrics-server
+            image: registry.k8s.io/metrics-server/metrics-server:v0.6.4
+            args:
+              - --cert-dir=/tmp
+              - --secure-port=4443
+              - --kubelet-preferred-address-types=InternalIP,ExternalIP,Hostname
+              - --kubelet-use-node-status-port
+              - --metric-resolution=15s
+              - --kubelet-insecure-tls
+            ports:
+            - name: https
+              containerPort: 4443
+              protocol: TCP
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: metrics-server
+      namespace: kube-system
+      labels:
+        k8s-app: metrics-server
+    spec:
+      selector:
+        k8s-app: metrics-server
+      ports:
+      - name: https
+        port: 443
+        protocol: TCP
+        targetPort: 4443
+    ---
+    apiVersion: v1
+    kind: ServiceAccount
+    metadata:
+      name: metrics-server
+      namespace: kube-system
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRole
+    metadata:
+      name: metrics-server
+    rules:
+    - apiGroups: [""]
+      resources: ["nodes", "nodes/metrics", "nodes/stats", "pods"]
+      verbs: ["get", "list"]
+    ---
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    metadata:
+      name: metrics-server
+    roleRef:
+      apiGroup: rbac.authorization.k8s.io
+      kind: ClusterRole
+      name: metrics-server
+    subjects:
+    - kind: ServiceAccount
+      name: metrics-server
+      namespace: kube-system
+    EOF
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+
+- name: Wait for metrics-server to be ready
+  shell: kubectl get pods -n kube-system -l k8s-app=metrics-server --no-headers | grep Running | wc -l
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: metrics_server_ready
+  until: metrics_server_ready.stdout == "1"
+  retries: 30
+  delay: 10
+
+- name: Wait for metrics API to be available
+  shell: kubectl top nodes --request-timeout=30s
+  environment:
+    KUBECONFIG: /etc/kubernetes/admin.conf
+  register: metrics_api_test
+  until: metrics_api_test.rc == 0
+  retries: 10
+  delay: 15
+  ignore_errors: yes

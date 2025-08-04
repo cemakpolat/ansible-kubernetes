@@ -1,0 +1,7 @@
+---
+- name: Prepare all nodes for Kubernetes
+  hosts: k8s_cluster
+  become: yes
+  gather_facts: yes
+  roles:
+    - k8s-common

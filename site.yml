@@ -1,0 +1,21 @@
+---
+- name: Install Kubernetes Cluster
+  hosts: k8s_cluster
+  become: yes
+  gather_facts: yes
+  roles:
+    - k8s-common
+
+- name: Configure Kubernetes Master
+  hosts: masters
+  become: yes
+  gather_facts: yes
+  roles:
+    - k8s-master
+
+- name: Configure Kubernetes Workers
+  hosts: workers
+  become: yes
+  gather_facts: yes
+  roles:
+    - k8s-worker
